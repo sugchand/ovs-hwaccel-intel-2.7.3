@@ -278,14 +278,6 @@ static struct ovs_mutex dpdk_mp_mutex OVS_ACQ_AFTER(dpdk_mutex)
 static struct ovs_list dpdk_mp_list OVS_GUARDED_BY(dpdk_mp_mutex)
     = OVS_LIST_INITIALIZER(&dpdk_mp_list);
 
-struct dpdk_mp {
-    struct rte_mempool *mp;
-    int mtu;
-    int socket_id;
-    int refcount;
-    struct ovs_list list_node OVS_GUARDED_BY(dpdk_mp_mutex);
-};
-
 /* There should be one 'struct dpdk_tx_queue' created for
  * each cpu core. */
 struct dpdk_tx_queue {
@@ -426,11 +418,17 @@ is_dpdk_class(const struct netdev_class *class)
  * behaviour, which reduces performance. To prevent this, use a buffer size
  * that is closest to 'mtu', but which satisfies the aforementioned criteria.
  */
-static uint32_t
+uint32_t
 dpdk_buf_size(int mtu)
 {
     return ROUND_UP((MTU_TO_MAX_FRAME_LEN(mtu) + RTE_PKTMBUF_HEADROOM),
                      NETDEV_DPDK_MBUF_ALIGN);
+}
+
+uint32_t
+dpdk_framelen_to_mtu(uint32_t buf_size)
+{
+    return FRAME_LEN_TO_MTU(buf_size);
 }
 
 /* Allocates an area of 'sz' bytes from DPDK.  The memory is zero'ed.
@@ -540,6 +538,19 @@ out:
     return dmp;
 }
 
+/*
+ * Function to allocate rte mempool for the external ports, such as dpdkhw
+ */
+struct dpdk_mp *
+dpdk_mp_get_ext(int socket_id, int mtu)
+{
+    struct dpdk_mp *dmp = NULL;
+    ovs_mutex_lock(&dpdk_mutex);
+    dmp = dpdk_mp_get(socket_id, mtu);
+    ovs_mutex_unlock(&dpdk_mutex);
+    return dmp;
+}
+
 static void
 dpdk_mp_put(struct dpdk_mp *dmp)
 {
@@ -556,6 +567,13 @@ dpdk_mp_put(struct dpdk_mp *dmp)
         rte_free(dmp);
     }
     ovs_mutex_unlock(&dpdk_mp_mutex);
+}
+
+void dpdk_mp_put_ext(struct dpdk_mp *dmp)
+{
+    ovs_mutex_lock(&dpdk_mutex);
+    dpdk_mp_put(dmp);
+    ovs_mutex_unlock(&dpdk_mutex);
 }
 
 /* Tries to allocate new mempool on requested_socket_id with
