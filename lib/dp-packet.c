@@ -101,6 +101,20 @@ dp_packet_init_dpdk(struct dp_packet *b, size_t allocated)
     dp_packet_init__(b, allocated, DPBUF_DPDK);
 }
 
+/*
+ * Read the dpdk inport from dpdk mbuf.
+ */
+uint8_t
+get_dp_packet_dpdk_portno(struct dp_packet *b)
+{
+    if (b->source == DPBUF_DPDK) {
+        return (uint8_t)b->mbuf.port;
+    }
+    return 0;
+}
+/*
+ */
+
 /* Initializes 'b' as an empty dp_packet with an initial capacity of 'size'
  * bytes. */
 void

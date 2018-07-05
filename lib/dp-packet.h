@@ -108,6 +108,7 @@ void dp_packet_use_stub(struct dp_packet *, void *, size_t);
 void dp_packet_use_const(struct dp_packet *, const void *, size_t);
 
 void dp_packet_init_dpdk(struct dp_packet *, size_t allocated);
+uint8_t get_dp_packet_dpdk_portno(struct dp_packet *b);
 
 void dp_packet_init(struct dp_packet *, size_t);
 void dp_packet_uninit(struct dp_packet *);
