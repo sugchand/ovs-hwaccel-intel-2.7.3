@@ -60,5 +60,6 @@ struct smap;
 void dpdk_init(const struct smap *ovs_other_config);
 void dpdk_set_lcore_id(unsigned cpu);
 const char *dpdk_get_vhost_sock_dir(void);
+struct id_pool *dpdk_get_vhost_id_pool(void);
 
 #endif /* dpdk.h */

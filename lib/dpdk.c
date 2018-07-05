@@ -29,6 +29,7 @@
 
 #include "dirs.h"
 #include "fatal-signal.h"
+#include "id-pool.h"
 #include "netdev-dpdk.h"
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/vlog.h"
@@ -37,6 +38,7 @@
 VLOG_DEFINE_THIS_MODULE(dpdk);
 
 static char *vhost_sock_dir = NULL;   /* Location of vhost-user sockets */
+static struct id_pool *vhost_driver_ids;  /* Pool of IDs for vHost PMDs */
 
 static int
 process_vhost_flags(char *flag, const char *default_val, int size,
@@ -410,6 +412,8 @@ dpdk_init__(const struct smap *ovs_other_config)
     }
 #endif
 
+    vhost_driver_ids = id_pool_create(0, RTE_MAX_ETHPORTS - 1);
+
     /* Finally, register the dpdk classes */
     netdev_dpdk_register();
 }
@@ -446,6 +450,12 @@ const char *
 dpdk_get_vhost_sock_dir(void)
 {
     return vhost_sock_dir;
+}
+
+struct id_pool *
+dpdk_get_vhost_id_pool(void)
+{
+    return vhost_driver_ids;
 }
 
 void
