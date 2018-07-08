@@ -70,6 +70,48 @@ struct flow_xlate_dic {
                        const void *md);
 };
 
+static inline bool
+is_rte_flow_batch_full(struct rte_flow_batch *flow_batch)
+{
+    if (flow_batch->used >= flow_batch->max_size) {
+        return true;
+    }
+    return false;
+}
+
+/*
+ * rte_flow_start must have the size
+ * MAX_DPDKHW_RTE_FLOW_SIZE * sizeof(rte_flow_item)
+ */
+void
+init_rte_flow_batch(struct rte_flow_batch *batch,
+                    struct rte_flow_item rte_flow_start[],
+                    uint32_t batch_size)
+{
+    batch->used = 0;
+    batch->max_size = batch_size;
+    /* rte_flow_start is an array of rte_flow_item */
+    batch->flow_batch = rte_flow_start;
+}
+
+static inline bool
+rte_flow_item_push(struct rte_flow_batch *batch, void *flow,
+                   void *mask, enum rte_flow_item_type type)
+{
+    struct rte_flow_item *flow_item;
+    if (is_rte_flow_batch_full(batch)) {
+        VLOG_ERR("Failed to install flow entry, the flow batch set is full");
+        return false;
+    }
+    flow_item = batch->flow_batch + batch->used;
+    flow_item->spec = flow;
+    flow_item->mask = mask;
+    flow_item->type = type;
+    flow_item->last = NULL;
+    batch->used++;
+    return true;
+
+}
 
 static void
 dpdkhw_rte_eth_set_action(const struct ovs_key_ethernet *key,
