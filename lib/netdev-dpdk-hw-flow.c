@@ -305,6 +305,72 @@ is_protocol_supported_in_hw(struct dpdkhw_switch *hw_switch,
     return false;
 }
 
+/*
+ * Function to check if a flow is already present in the hw before installing
+ */
+static inline bool
+is_flow_present_in_hw(struct netdev *netdev, const ovs_u128 *ufid,
+                      const struct nlattr *actions,
+                      size_t actions_len)
+{
+    struct ufid_to_rteflow *entry;
+    entry = get_ufid_to_rteflow_mapping(ufid, netdev);
+    if (entry) {
+        if (entry->action_len != actions_len) {
+            /* Drop action can have zero len, so
+             * check action_len to see if a flow need to be modified
+             * in hw
+             */
+            return false;
+        }
+        if (!memcmp(entry->actions, actions, actions_len)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static enum hw_switch_flow_install_err
+is_flow_ofld_on_full_em_switch_supported(struct netdev *netdev,
+                                         struct dpdkhw_switch *hw_switch,
+                                         struct match *match,
+                                         const struct nlattr *actions,
+                                         size_t actions_len,
+                                         const ovs_u128 *ufid,
+                                         struct offload_info *info)
+{
+    int ret = 0;
+
+    /* hardware doesnt have flow modify support, hence first delete the flow
+     * before trying the flow install.
+     * Modify with drop action is used as a delete function by revalidator.
+     */
+    if (info->flow_flags & DPIF_FP_MODIFY) {
+        if (is_flow_present_in_hw(netdev, ufid, actions, actions_len)) {
+            /*
+             * No need to modify the flow in hw as its same as in sw.
+             */
+            return FLOW_PRESENT_IN_HW;
+        }
+        VLOG_DBG("Deleteing flows when modifying existing flows.");
+        netdev_dpdkhw_switch_flow_del(netdev, hw_switch, ufid);
+    }
+
+    /* Check if the flow count before the install */
+    if (atomic_count_get(&hw_switch->n_flow_cnt) >=
+        hw_switch->total_flow_cnt) {
+        return FLOW_MAX_LIMIT_REACHED;
+    }
+
+    /* Check if flow types are supported in the switch */
+    if (!is_protocol_supported_in_hw(hw_switch, match)) {
+        return FLOW_PROTO_UNSUPPORTED;
+    }
+
+    /* Check if the actions has port output, make sure its in same device */
+    return is_action_hanlded_in_one_device(hw_switch, actions,
+                                           actions_len, info);
+}
 
 static enum xlate_status
 do_inport_flow_xlate(struct match *match, struct rte_flow_batch *batch,
