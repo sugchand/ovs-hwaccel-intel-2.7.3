@@ -34,6 +34,7 @@
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/vlog.h"
 #include "smap.h"
+#include "netdev-dpdk-hw.h"
 
 VLOG_DEFINE_THIS_MODULE(dpdk);
 
@@ -416,6 +417,10 @@ dpdk_init__(const struct smap *ovs_other_config)
 
     /* Finally, register the dpdk classes */
     netdev_dpdk_register();
+    if (smap_get_bool(ovs_other_config, "dpdk-hw-offload-init", false)) {
+        dpdkhw_init(ovs_other_config);
+    }
+
 }
 
 void
