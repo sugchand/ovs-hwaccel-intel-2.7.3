@@ -40,6 +40,7 @@
 #include "hash.h"
 #include "openvswitch/list.h"
 #include "netdev-dpdk.h"
+#include "netdev-dpdk-hw.h"
 #include "netdev-provider.h"
 #include "netdev-vport.h"
 #include "odp-netlink.h"
@@ -2324,6 +2325,73 @@ netdev_ports_flow_del(const struct dpif_class *dpif_class,
 
     return ENOENT;
 }
+
+#ifdef DPDK_NETDEV
+/*
+ * Read the odp_port number for a specific dpdk/dpdkhw port.
+ */
+odp_port_t
+get_netdev_odp_port(const struct dpif_class *dpif_class, uint8_t dpdk_port)
+{
+    struct port_to_netdev_data *data;
+    odp_port_t portno = ODPP_LOCAL;
+    ovs_mutex_lock(&netdev_hmap_mutex);
+    HMAP_FOR_EACH(data, node, &port_to_netdev) {
+        struct netdev *netdev;
+        netdev = data->netdev;
+        if (!is_dpdkhw_port(netdev)) {
+            continue;
+        }
+        if (dpdk_port == netdev_get_dpdk_portno(netdev) &&
+            data->dpif_class == dpif_class) {
+            portno = data->dpif_port.port_no;
+            goto out;
+        }
+    }
+
+out:
+    ovs_mutex_unlock(&netdev_hmap_mutex);
+    return portno;
+}
+
+bool
+is_inport_hw_accelerated(const struct dpif_class *dpif_class,
+                         odp_port_t dp_portno)
+{
+    struct netdev *netdev = NULL;
+    struct port_to_netdev_data *data;
+    bool ret =  false;
+    ovs_mutex_lock(&netdev_hmap_mutex);
+    HMAP_FOR_EACH(data, node, &port_to_netdev) {
+        if (data->dpif_class == dpif_class &&
+            data->dpif_port.port_no == dp_portno) {
+            netdev = data->netdev;
+            if (netdev && is_dpdkhw_port(netdev)) {
+                /* the port is hardware accelerated */
+                ret = true;
+            }
+            goto out;
+        }
+    }
+
+out:
+    ovs_mutex_unlock(&netdev_hmap_mutex);
+    return ret;
+}
+
+#else // not DPDK_NETDEV
+odp_port_t
+get_netdev_odp_port(const struct dpif_class *dpif_class, uint8_t dpdk_port)
+{
+    return ODPP_LOCAL;
+}
+bool
+is_inport_hw_accelerated(const struct dpif_class *dpif_class,
+                         odp_port_t dp_portno)
+{
+    return false;
+}
+#endif //DPDK_NETDEV
 
 int
 netdev_ports_flow_put(const struct dpif_class *dpif_class,
