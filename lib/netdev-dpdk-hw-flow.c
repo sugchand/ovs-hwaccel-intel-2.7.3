@@ -1245,3 +1245,80 @@ dpdkhw_rte_flow_action_cleanup(struct rte_flow_item hw_flow_batch[],
     return 0;
 }
 
+static void
+update_hw_switch_on_flowadd(struct dpdkhw_switch *hw_switch)
+{
+    atomic_count_inc(&hw_switch->n_flow_cnt);
+}
+
+static void
+update_hw_switch_on_flowdel(struct dpdkhw_switch *hw_switch)
+{
+    atomic_count_dec(&hw_switch->n_flow_cnt);
+}
+
+static struct rte_flow *
+install_ovs_flow_in_hw(struct netdev *netdev, struct dpdkhw_switch *hw_switch,
+                       const struct rte_flow_attr *hw_flow_attr,
+                       struct rte_flow_item *hw_flow_batch,
+                       struct rte_flow_action *hw_action_batch,
+                       struct rte_flow_error *hw_err)
+{
+    uint16_t dpdk_portno = netdev_get_dpdk_portno(netdev);
+    struct rte_flow *hw_flow = rte_flow_create(dpdk_portno, hw_flow_attr,
+                                               hw_flow_batch, hw_action_batch,
+                                               hw_err);
+    dpdkhw_rte_flow_action_cleanup(hw_flow_batch, hw_action_batch);
+    if (hw_err->type != RTE_FLOW_ERROR_TYPE_NONE) {
+        /* Error while installing the flow */
+        VLOG_ERR("Failed to install a flow(error : %u)", hw_err->type);
+        hw_flow = NULL;
+    }
+    if (hw_flow) {
+        /* update the hardware switch only when flow is installed */
+        update_hw_switch_on_flowadd(hw_switch);
+    }
+    return hw_flow;
+}
+
+/* Delete all the flows that are corresponds to single ufid. */
+static int
+netdev_del_rte_flow(struct ufid_to_rteflow *entry, uint16_t dpdk_portno,
+                    struct dpdkhw_switch *hw_switch)
+{
+    int i;
+    int ret = 0;
+    for (i = 0; i < entry->hw_flow_size_used; i++) {
+        struct rte_flow_error rte_flow_err;
+        int res;
+        res = rte_flow_destroy(dpdk_portno, entry->hw_flows[i],
+                                &rte_flow_err);
+        if (!res) {
+            update_hw_switch_on_flowdel(hw_switch);
+        }
+        ret |= res;
+    }
+    return ret;
+}
+
+static int
+delete_ovs_flow_in_hw(struct netdev *netdev, struct dpdkhw_switch *hw_switch,
+                      const ovs_u128 *ufid)
+{
+    struct ufid_to_rteflow *entry;
+    int ret = -ENOENT;
+    entry = get_ufid_to_rteflow_mapping(ufid, netdev);
+    if (entry) {
+        uint16_t dpdk_portno = netdev_get_dpdk_portno(netdev);
+        ret = netdev_del_rte_flow(entry, dpdk_portno, hw_switch);
+    }
+    return ret;
+}
+
+const struct dpdkhw_switch_fns dpdkhw_full_em_switch_fns = {
+    is_flow_ofld_on_full_em_switch_supported,
+    dpdkhw_rte_flow_xlate,
+    dpdkhw_em_action_xlate,
+    install_ovs_flow_in_hw,
+    delete_ovs_flow_in_hw
+};
