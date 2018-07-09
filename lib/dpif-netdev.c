@@ -111,6 +111,15 @@ static struct odp_support dp_netdev_support = {
     .ct_label = true,
 };
 
+static struct odp_support dp_netdevhw_support = {
+    .max_mpls_depth = SIZE_MAX,
+    .recirc = true,
+    .ct_state = false,
+    .ct_zone = false,
+    .ct_mark = false,
+     .ct_label = false
+};
+
 /* Stores a miniflow with inline values */
 
 struct netdev_flow_key {
@@ -2369,6 +2378,108 @@ dp_netdev_flow_add(struct dp_netdev_pmd_thread *pmd,
     return flow;
 }
 
+/* Function to store the virtual ports to hardware inport mapping.
+ * It stores the mapping between flow-inport and the original port
+ * that present in the packet.
+ */
+static uint64_t
+store_hw_inport_map(const struct dpif_class *dpif_class,
+                    struct dp_packet *pkt, struct match *match)
+{
+    uint8_t portno;
+    uint64_t port_map = 0;
+    odp_port_t odp_inport;
+
+    portno = get_dp_packet_dpdk_portno(pkt);
+    if (portno <= 0 || portno >= MAX_DPDKHW_PORTS) {
+        /* Invalid port number, cannot set it */
+        VLOG_INFO("Failed to set port number in flow, invalid portno %d",
+                                                       portno);
+        return port_map;
+    }
+    /* Get dp port number from the hw dpdk port no */
+    odp_inport = get_netdev_odp_port(dpif_class, portno);
+    if (odp_inport && odp_inport != match->flow.in_port.odp_port) {
+       port_map = store_hw_odp_port_in_map(match->flow.in_port.odp_port,
+                                           odp_inport);
+    }
+    return port_map;
+}
+
+static int
+dpif_netdev_hwport_flow_put__(const struct dpif_class *dpif_class,
+                          enum dpif_flow_put_flags flags,
+                          uint64_t port_set, /* hw-accel-port | orig_port */
+                          struct match *match, const struct nlattr *actions,
+                          size_t actions_len, const ovs_u128 *ufid,
+                          struct dpif_flow_stats *stats)
+{
+    if (flags & DPIF_FP_CREATE || flags & DPIF_FP_MODIFY) {
+        return netdev_ports_flow_put(dpif_class, flags, port_set, match,
+                                     actions, actions_len, stats, ufid);
+    }
+    else {
+        return ENOTSUP;
+    }
+    return ENOENT;
+}
+
+static int
+dpif_netdev_hwport_flow_put(const struct dpif_class *dpif_class,
+                          enum dpif_flow_put_flags flags,
+                          struct dp_packet *pkt,
+                          struct match *match, const struct nlattr *actions,
+                          size_t actions_len, const ovs_u128 *ufid,
+                          struct dpif_flow_stats *stats)
+{
+    int ret = EINVAL;
+    odp_port_t tmp_port;
+    uint64_t port_set = 0;
+    int i = 0;
+    bool is_more;
+    tmp_port = match->flow.in_port.odp_port;
+
+    /* Check if in-port is hw accelerated */
+    if (is_inport_hw_accelerated(dpif_class, tmp_port)) {
+        return dpif_netdev_hwport_flow_put__(dpif_class, flags, port_set,
+                                        match, actions,
+                                        actions_len, ufid, stats);
+    }
+
+    /* in-port is non-accelerated, get the corresponding accel port */
+    if (pkt) {
+        /* Store the accelerated port info from the packet to the map */
+        port_set = store_hw_inport_map(dpif_class, pkt, match);
+        if (!port_set) {
+            /* Cannot find a accel-port/error in storing the mapping.
+             * Do not try to install as it may cause isssues for flow
+             * management from control threads.
+             */
+            return 0;
+        }
+        return dpif_netdev_hwport_flow_put__(dpif_class, flags, port_set,
+                                            match, actions,
+                                            actions_len, ufid, stats);
+    }
+
+    /* In control thread context(with no pkt present) */
+    do {
+        is_more = getnext_hw_odp_port_in_map(tmp_port, &port_set, &i);
+        if (!port_set) {
+            /*
+             * Cannot find a accelerated port, or error case.
+             * Keep looking for more mappings in the port-map-set.
+             */
+            continue;
+        }
+        /* One of the flow install must be success */
+        ret &= dpif_netdev_hwport_flow_put__(dpif_class, flags, port_set,
+                                            match, actions,
+                                            actions_len, ufid, stats);
+    }while (is_more);
+    return ret;
+}
+
 static int
 flow_put_on_pmd(struct dp_netdev_pmd_thread *pmd,
                 struct netdev_flow_key *key,
@@ -2389,7 +2500,8 @@ flow_put_on_pmd(struct dp_netdev_pmd_thread *pmd,
     if (!netdev_flow) {
         if (put->flags & DPIF_FP_CREATE) {
             if (cmap_count(&pmd->flow_table) < MAX_FLOWS) {
-                dp_netdev_flow_add(pmd, match, ufid, put->actions,
+                netdev_flow = dp_netdev_flow_add(pmd, match, ufid,
+                                   put->actions,
                                    put->actions_len);
                 error = 0;
             } else {
@@ -2475,9 +2587,21 @@ dpif_netdev_flow_put(struct dpif *dpif, const struct dpif_flow_put *put)
     netdev_flow_key_from_flow(&key, &match.flow);
 
     if (put->pmd_id == PMD_ID_NULL) {
+        int hw_err;
         if (cmap_count(&dp->poll_threads) == 0) {
             return EINVAL;
         }
+
+        /* Update flows in hardware when its supported.
+         * PMD set to NULL for hardware flows*/
+        hw_err = dpif_netdev_hwport_flow_put(dpif->dpif_class, put->flags,
+                                NULL, &match, put->actions, put->actions_len,
+                                put->ufid, put->stats);
+        if (!hw_err) {
+            /* Flow is already installed in hw, so no need to update in sw */
+            return hw_err;
+        }
+
         CMAP_FOR_EACH (pmd, node, &dp->poll_threads) {
             struct dpif_flow_stats pmd_stats;
             int pmd_error;
@@ -2516,12 +2640,20 @@ flow_del_on_pmd(struct dp_netdev_pmd_thread *pmd,
     ovs_mutex_lock(&pmd->flow_mutex);
     netdev_flow = dp_netdev_pmd_find_flow(pmd, del->ufid, del->key,
                                           del->key_len);
+
+    /* Sometimes the flow is present in SW and HW, the flow dump collects
+     * same flow twice from SW and HW. In the first sweep the flow is being
+     * deleted from sw.
+     * Eventually in the following sweep phases the flow is being deleted
+     * from hardware too.
+     */
     if (netdev_flow) {
         if (stats) {
             get_dpif_flow_stats(netdev_flow, stats);
         }
         dp_netdev_pmd_remove_flow(pmd, netdev_flow);
-    } else {
+    }
+    else {
         error = ENOENT;
     }
     ovs_mutex_unlock(&pmd->flow_mutex);
@@ -2558,6 +2690,15 @@ dpif_netdev_flow_del(struct dpif *dpif, const struct dpif_flow_del *del)
                 del->stats->tcp_flags |= pmd_stats.tcp_flags;
             }
         }
+        /*
+         * XXX :: The flow can be present in both sw & hw. Sometimes it will
+         * be either in sw or hw. So lets try to delete the flow
+         * unconditionally from hardware if possible.
+         */
+        int hw_error = 0;
+        hw_error = netdev_ports_flow_del(dp->class, del->ufid, del->stats);
+        error &= hw_error;
+
     } else {
         pmd = dp_netdev_get_pmd(dp, del->pmd_id);
         if (!pmd) {

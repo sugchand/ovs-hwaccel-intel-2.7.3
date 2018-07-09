@@ -2108,6 +2108,19 @@ netdev_init_flow_api(struct netdev *netdev)
             : EOPNOTSUPP);
 }
 
+#ifdef DPDK_NETDEV
+bool
+netdev_is_flow_api_enabled(void)
+{
+    return netdev_is_dpdkhw_enabled();
+}
+#else
+bool
+netdev_is_flow_api_enabled(void)
+{
+    return netdev_flow_api_enabled;
+}
+#endif
 
 /* Protects below port hashmaps. */
 static struct ovs_mutex netdev_hmap_mutex = OVS_MUTEX_INITIALIZER;

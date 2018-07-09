@@ -3148,7 +3148,7 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
     if (xport->peer) {
         const struct xport *peer = xport->peer;
         struct flow old_flow = ctx->xin->flow;
-        struct flow_tnl old_flow_tnl_wc = ctx->wc->masks.tunnel;
+        struct flow old_flow_wc = ctx->wc->masks;
         bool old_conntrack = ctx->conntracked;
         bool old_was_mpls = ctx->was_mpls;
         ovs_version_t old_version = ctx->xin->tables_version;
@@ -3243,7 +3243,7 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
          * the peer bridge uses a separate tunnel metadata table and therefore
          * any generated wildcards will be garbage in the context of our
          * metadata table. */
-        ctx->wc->masks.tunnel = old_flow_tnl_wc;
+        ctx->wc->masks = old_flow_wc;
 
         /* The peer bridge popping MPLS should have no effect on the original
          * bridge. */
