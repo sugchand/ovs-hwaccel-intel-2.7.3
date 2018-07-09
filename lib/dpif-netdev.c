@@ -1355,6 +1355,14 @@ do_add_port(struct dp_netdev *dp, const char *devname, const char *type,
         return error;
     }
 
+    /* Add port to netdev hashmap if hardware acceleration is used */
+    if (is_dpdkhw_port(port->netdev)) {
+        struct dpif_port dpif_port;
+        VLOG_INFO("Adding HW port to hash mash");
+        answer_port_query(port, &dpif_port);
+        netdev_ports_insert(port->netdev, dp->class, &dpif_port);
+    }
+
     hmap_insert(&dp->ports, &port->node, hash_port_no(port_no));
     seq_change(dp->port_seq);
 
