@@ -22,7 +22,7 @@
 #include <rte_eal.h>
 #include <rte_debug.h>
 #include <rte_ethdev.h>
-#include <vdpo.h>
+#include <rte_vdpa.h>
 #include <timeval.h>
 
 #include "dpif-netdev.h"
@@ -94,6 +94,104 @@ struct netdev_dpdkhw {
     struct hmap ufid_to_flow_map; /* hashmap to store hardware flows */
     /* XXX : WILL ADD MORE FIELDS ACCORDING TO THE FPGA CONFIG OPTIONS */
 };
+
+
+static bool
+del_ufid_to_rteflow_mapping(const ovs_u128 *ufid,
+                            const struct netdev *netdev)
+                            OVS_REQUIRES(dpdkhw_flow_mutex)
+{
+    struct ufid_to_rteflow *data = NULL;
+    size_t hash = hash_bytes(ufid, sizeof *ufid, 0);
+    struct netdev_dpdkhw *dev = netdev_dpdkhw_cast(netdev);
+    struct hmap *ufid_to_flow_map = &dev->ufid_to_flow_map;
+    HMAP_FOR_EACH_WITH_HASH(data, node, hash, ufid_to_flow_map) {
+        if (ovs_u128_equals(*ufid, data->ufid)) {
+            break;
+        }
+    }
+    if(data) {
+        free(data->actions);
+        free(data->hw_flows);
+        hmap_remove(ufid_to_flow_map, &data->node);
+        free(data);
+        return true;
+    }
+    return false;
+}
+
+/*
+ * Add flow mapping, return TRUE when a mapping is exists.
+ * Reture FALSE if new flow is installed.
+ */
+static bool
+add_ufid_to_rteflow_mapping(const ovs_u128 *ufid, const struct netdev *netdev,
+                            const struct rte_flow *hw_flow,
+                            struct match *match,
+                            const struct nlattr *actions,
+                            const size_t actions_len)
+                            OVS_REQUIRES(dpdkhw_flow_mutex)
+{
+    #define HW_FLOW_BLOCK_SIZE  256
+    size_t hash = hash_bytes(ufid, sizeof *ufid, 0);
+    struct netdev_dpdkhw *dev = netdev_dpdkhw_cast(netdev);
+    struct hmap *ufid_to_flow_map = &dev->ufid_to_flow_map;
+    struct ufid_to_rteflow *ufid_to_flow;
+
+    ufid_to_flow = get_ufid_to_rteflow_mapping(ufid, netdev);
+    if (!ufid_to_flow) {
+        /* flow map is not present, add it */
+        ufid_to_flow  = xzalloc(sizeof *ufid_to_flow);
+        ufid_to_flow->netdev = netdev;
+        ufid_to_flow->ufid = *ufid;
+        ufid_to_flow->netdev = netdev;
+        ufid_to_flow->hw_flows = xzalloc(sizeof (struct rte_flow *) *
+                                         HW_FLOW_BLOCK_SIZE);
+        ufid_to_flow->hw_flow_size_allocated = HW_FLOW_BLOCK_SIZE;
+        ufid_to_flow->hw_flow_size_used = 1;
+        ufid_to_flow->hw_flows[0] = hw_flow;
+        memcpy(&ufid_to_flow->match, match, sizeof *match);
+        ufid_to_flow->actions = xzalloc(actions_len);
+        memcpy(ufid_to_flow->actions, actions, actions_len);
+        ufid_to_flow->action_len = actions_len;
+        hmap_insert(ufid_to_flow_map, &ufid_to_flow->node, hash);
+        return false;
+    }
+    else {
+        if (ufid_to_flow->hw_flow_size_used <
+            ufid_to_flow->hw_flow_size_allocated) {
+            ufid_to_flow->hw_flows[ufid_to_flow->hw_flow_size_used++] =
+                                                    hw_flow;
+        }
+        else {
+            /* Need to reallocate the memory for more flows. */
+            ufid_to_flow->hw_flow_size_allocated += HW_FLOW_BLOCK_SIZE;
+            ufid_to_flow->hw_flows = xrealloc(ufid_to_flow->hw_flows,
+                                     sizeof (struct rte_flow *) *
+                                     ufid_to_flow->hw_flow_size_allocated);
+            ufid_to_flow->hw_flows[ufid_to_flow->hw_flow_size_used++] =
+                                                hw_flow;
+        }
+        return true;
+    }
+}
+
+struct ufid_to_rteflow *
+get_ufid_to_rteflow_mapping(const ovs_u128 *ufid,
+                            const struct netdev *netdev)
+                            OVS_REQUIRES(dpdkhw_flow_mutex)
+{
+    struct ufid_to_rteflow *data = NULL;
+    struct netdev_dpdkhw *dev = netdev_dpdkhw_cast(netdev);
+    struct hmap *ufid_to_flow_map = &dev->ufid_to_flow_map;
+    size_t hash = hash_bytes(ufid, sizeof *ufid, 0);
+    HMAP_FOR_EACH_WITH_HASH(data, node, hash, ufid_to_flow_map) {
+        if (ovs_u128_equals(*ufid, data->ufid)) {
+            return data;
+        }
+    }
+    return NULL;
+}
 
 
 int
@@ -305,7 +403,7 @@ register_switch_engine(void)
         int engid = 0;
         struct dpdkhw_switch *hw_switch;
         uint32_t afuid = 0; /* It is not expected to be selected */
-        struct rte_vdpo_hw_afu_device *afudev;
+        struct rte_vdpa_hw_afu_device *afudev;
         int i;
         char str[MAX_HW_DEV_NAME_LEN];
         for (i = 0; i < hw_switches.num_devs; i++) {
@@ -322,7 +420,7 @@ register_switch_engine(void)
             afudev->addr = hw_switch->pci_addr;
             afudev->afu_id = afuid;
             afudev->mempool = hw_switch->dpdk_mp->mp;
-            engid = rte_vdpo_register_engine("fpga", afudev);
+            engid = rte_vdpa_register_engine("fpga", afudev);
             if (engid >= 0) {
                 /* valid engine id */
                 hw_switch->hw_engid = engid;
